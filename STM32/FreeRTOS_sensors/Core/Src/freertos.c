@@ -25,11 +25,20 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include "UART_print.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+
+typedef struct {
+  uint32_t t_ms;
+  int16_t ax, ay, az;
+  int16_t gx, gy, gz;
+} data_read;
+
+osStatus_t st;
 
 /* USER CODE END PTD */
 
@@ -61,6 +70,30 @@ const osThreadAttr_t blink02_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityBelowNormal,
 };
+/* Definitions for SensorRead */
+osThreadId_t SensorReadHandle;
+const osThreadAttr_t SensorRead_attributes = {
+  .name = "SensorRead",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
+/* Definitions for DataProcess */
+osThreadId_t DataProcessHandle;
+const osThreadAttr_t DataProcess_attributes = {
+  .name = "DataProcess",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal1,
+};
+/* Definitions for data_queue */
+osMessageQueueId_t data_queueHandle;
+const osMessageQueueAttr_t data_queue_attributes = {
+  .name = "data_queue"
+};
+/* Definitions for uartMutex */
+osMutexId_t uartMutexHandle;
+const osMutexAttr_t uartMutex_attributes = {
+  .name = "uartMutex"
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -69,6 +102,8 @@ const osThreadAttr_t blink02_attributes = {
 
 void StartBlink01(void *argument);
 void StartBlink02(void *argument);
+void SensorReadTask(void *argument);
+void DataProcessTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -81,6 +116,9 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
+  /* Create the mutex(es) */
+  /* creation of uartMutex */
+  uartMutexHandle = osMutexNew(&uartMutex_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
@@ -94,6 +132,10 @@ void MX_FREERTOS_Init(void) {
   /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
 
+  /* Create the queue(s) */
+  /* creation of data_queue */
+  data_queueHandle = osMessageQueueNew (16, sizeof(data_read), &data_queue_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
@@ -104,6 +146,12 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of blink02 */
   blink02Handle = osThreadNew(StartBlink02, NULL, &blink02_attributes);
+
+  /* creation of SensorRead */
+  SensorReadHandle = osThreadNew(SensorReadTask, NULL, &SensorRead_attributes);
+
+  /* creation of DataProcess */
+  DataProcessHandle = osThreadNew(DataProcessTask, NULL, &DataProcess_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -153,6 +201,75 @@ void StartBlink02(void *argument)
   }
   osThreadTerminate(NULL);
   /* USER CODE END StartBlink02 */
+}
+
+/* USER CODE BEGIN Header_SensorReadTask */
+/**
+* @brief Function implementing the SensorRead thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_SensorReadTask */
+void SensorReadTask(void *argument)
+{
+  /* USER CODE BEGIN SensorReadTask */
+	uint32_t t = 0;
+  /* Infinite loop */
+  for(;;)
+  {
+	  data_read s;
+	  s.t_ms = osKernelGetTickCount();   // RTOS tick count in ms if tick=1ms
+	  s.ax = (int16_t)(t % 2000);
+	  s.ay = 0;
+	  s.az = 16000;
+	  s.gx = 0;
+	  s.gy = 0;
+	  s.gz = 0;
+
+	  st = osMessageQueuePut(data_queueHandle, &s, 0, 0);
+
+	  if (st != osOK) {
+
+	  }
+
+	  t++;
+	  osDelay(5); // 200 Hz-ishosDelay(1);
+  }
+  osThreadTerminate(NULL);
+  /* USER CODE END SensorReadTask */
+}
+
+/* USER CODE BEGIN Header_DataProcessTask */
+/**
+* @brief Function implementing the DataProcess thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_DataProcessTask */
+void DataProcessTask(void *argument)
+{
+  /* USER CODE BEGIN DataProcessTask */
+  /* Infinite loop */
+	data_read s;
+	uint32_t count = 0;
+  for(;;)
+  {
+	  if (osMessageQueueGet(data_queueHandle, &s, NULL, osWaitForever) == osOK)
+	  {
+		count++;
+		if ((count % 200) == 0)
+		{
+			char msg[128];
+			snprintf(msg, sizeof(msg), "t=%lu ax=%d az=%d\r\n", (unsigned long)s.t_ms, s.ax, s.az);
+
+		  osMutexAcquire(uartMutexHandle, osWaitForever);
+		  print_thread(msg);
+		  osMutexRelease(uartMutexHandle);
+		}
+	  }
+  }
+  osThreadTerminate(NULL);
+  /* USER CODE END DataProcessTask */
 }
 
 /* Private application code --------------------------------------------------*/
