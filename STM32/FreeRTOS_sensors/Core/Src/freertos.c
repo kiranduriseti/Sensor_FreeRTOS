@@ -61,28 +61,28 @@ osThreadId_t blink01Handle;
 const osThreadAttr_t blink01_attributes = {
   .name = "blink01",
   .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .priority = (osPriority_t) osPriorityLow7,
 };
 /* Definitions for blink02 */
 osThreadId_t blink02Handle;
 const osThreadAttr_t blink02_attributes = {
   .name = "blink02",
   .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityBelowNormal,
+  .priority = (osPriority_t) osPriorityLow6,
 };
 /* Definitions for SensorRead */
 osThreadId_t SensorReadHandle;
 const osThreadAttr_t SensorRead_attributes = {
   .name = "SensorRead",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityAboveNormal,
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal1,
 };
 /* Definitions for DataProcess */
 osThreadId_t DataProcessHandle;
 const osThreadAttr_t DataProcess_attributes = {
   .name = "DataProcess",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal1,
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for data_queue */
 osMessageQueueId_t data_queueHandle;
@@ -134,7 +134,7 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the queue(s) */
   /* creation of data_queue */
-  data_queueHandle = osMessageQueueNew (16, sizeof(data_read), &data_queue_attributes);
+  data_queueHandle = osMessageQueueNew (2, sizeof(data_read), &data_queue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
@@ -233,7 +233,8 @@ void SensorReadTask(void *argument)
 	  }
 
 	  t++;
-	  osDelay(5); // 200 Hz-ishosDelay(1);
+	  //osDelay(5); // 200 Hz-ishosDelay(1);
+	  osDelay(1);
   }
   osThreadTerminate(NULL);
   /* USER CODE END SensorReadTask */
@@ -259,12 +260,10 @@ void DataProcessTask(void *argument)
 		count++;
 		if ((count % 200) == 0)
 		{
-			char msg[128];
+			char msg[64];
 			snprintf(msg, sizeof(msg), "t=%lu ax=%d az=%d\r\n", (unsigned long)s.t_ms, s.ax, s.az);
 
-		  osMutexAcquire(uartMutexHandle, osWaitForever);
 		  print_thread(msg);
-		  osMutexRelease(uartMutexHandle);
 		}
 	  }
   }
