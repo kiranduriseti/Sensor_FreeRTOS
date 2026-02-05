@@ -1,0 +1,80 @@
+############################################
+# STM32CubeIDE / STM32CubeMX Git Ignore
+############################################
+
+# --- Build output folders ---
+Debug/
+Release/
+build/
+out/
+*.o
+*.a
+*.elf
+*.map
+*.hex
+*.bin
+*.lst
+*.d
+*.su
+
+# --- CubeIDE metadata ---
+.settings/
+.project
+.cproject
+*.launch
+
+# --- Eclipse workspace junk ---
+.metadata/
+*.swp
+*~
+*.bak
+
+# --- CubeMX generated temp files ---
+*.ioc.bak
+*.mxproject
+
+# --- Keil / MDK-ARM ---
+MDK-ARM/
+*.uvoptx
+*.uvprojx
+*.uvguix
+*.scvd
+
+# --- IAR Embedded Workbench ---
+EWARM/
+*.ewp
+*.eww
+*.ewd
+
+# --- VSCode ---
+.vscode/
+
+# --- MacOS junk ---
+.DS_Store
+
+# --- Windows junk ---
+Thumbs.db
+Desktop.ini
+
+# --- STM32 HAL driver build outputs ---
+Drivers/**/Src/*.o
+Drivers/**/Src/*.d
+
+############################################
+# KEEP THESE TRACKED (important source files)
+############################################
+
+# Source code
+!Core/
+!Core/Src/
+!Core/Inc/
+
+# HAL Drivers + CMSIS
+!Drivers/
+
+# Startup + linker scripts
+!startup_stm32*.s
+!*.ld
+
+# CubeMX config file (very important!)
+!*.ioc
