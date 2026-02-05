@@ -27,7 +27,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "i2c.h"
 #include "UART_print.h"
+#include "mpu.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -87,7 +89,9 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  __HAL_RCC_I2C2_FORCE_RESET();
+  __HAL_RCC_I2C2_RELEASE_RESET();
+  MX_I2C2_Init();
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -99,7 +103,8 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
-  UART_print_blocking("Program Start\n");
+  UART_print_blocking("Program Start");
+  mpu_init();
 
   /* USER CODE END 2 */
 

@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include "UART_print.h"
+#include "mpu.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -43,6 +44,19 @@ osStatus_t st;
 TickType_t period = pdMS_TO_TICKS(5);
 TickType_t b1 = pdMS_TO_TICKS(500);
 TickType_t b2 = pdMS_TO_TICKS(600);
+
+int16_t ax, ay, az;
+int16_t gx, gy, gz;
+
+HAL_StatusTypeDef debugger_gyro;
+HAL_StatusTypeDef debugger_acc;
+
+extern I2C_HandleTypeDef hi2c2;
+
+HAL_I2C_StateTypeDef i2c_st;
+uint32_t err;
+uint32_t isr;
+
 
 /* USER CODE END PTD */
 
@@ -227,12 +241,20 @@ void SensorReadTask(void *argument)
   {
 	  data_read s;
 	  s.t_ms = osKernelGetTickCount();   // RTOS tick count in ms if tick=1ms
-	  s.ax = (int16_t)(t % 2000);
-	  s.ay = 0;
-	  s.az = 16000;
-	  s.gx = 0;
-	  s.gy = 0;
-	  s.gz = 0;
+
+	  i2c_st = HAL_I2C_GetState(&hi2c2);
+	  err = HAL_I2C_GetError(&hi2c2);
+	  isr = hi2c2.Instance->ISR;
+
+	  debugger_acc = mpu_read_acc(&ax, &ay, &az);
+	  s.ax = ax;
+	  s.ay = ay;
+	  s.az = az;
+
+	  debugger_gyro = mpu_read_gyro(&gx, &gy, &gz);
+	  s.gx = gz;
+	  s.gy = gy;
+	  s.gz = gz;
 
 	  st = osMessageQueuePut(data_queueHandle, &s, 0, 0);
 
