@@ -28,16 +28,20 @@
 #include <stdio.h>
 #include "UART_print.h"
 #include "mpu.h"
+#include <string.h>
+#include "fatfs.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 typedef struct {
   uint32_t t_ms;
   int16_t ax, ay, az;
   int16_t gx, gy, gz;
 } data_read;
+
+#define chunk_size 1024
+data_read chunk[chunk_size];
 
 osStatus_t st;
 
@@ -57,6 +61,15 @@ HAL_I2C_StateTypeDef i2c_st;
 uint32_t err;
 uint32_t isr;
 
+extern uint8_t retSD;    /* Return value for SD */
+extern char SDPath[4];   /* SD logical drive path */
+extern FATFS SDFatFS;    /* File system object for SD logical drive */
+extern FIL SDFile;       /* File object for SD */
+
+FRESULT res;
+uint32_t byteswritten, bytesread;
+
+char* filename = "SD_file.txt";
 
 /* USER CODE END PTD */
 
@@ -102,6 +115,13 @@ const osThreadAttr_t DataProcess_attributes = {
   .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for SD_write */
+osThreadId_t SD_writeHandle;
+const osThreadAttr_t SD_write_attributes = {
+  .name = "SD_write",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* Definitions for data_queue */
 osMessageQueueId_t data_queueHandle;
 const osMessageQueueAttr_t data_queue_attributes = {
@@ -122,6 +142,7 @@ void StartBlink01(void *argument);
 void StartBlink02(void *argument);
 void SensorReadTask(void *argument);
 void DataProcessTask(void *argument);
+void SD_write_task(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -170,6 +191,9 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of DataProcess */
   DataProcessHandle = osThreadNew(DataProcessTask, NULL, &DataProcess_attributes);
+
+  /* creation of SD_write */
+  SD_writeHandle = osThreadNew(SD_write_task, NULL, &SD_write_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -239,13 +263,14 @@ void SensorReadTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
+	  //dont need mutex since only i2c transaction
 	  data_read s;
 	  s.t_ms = osKernelGetTickCount();   // RTOS tick count in ms if tick=1ms
-
+	  /* Debugging
 	  i2c_st = HAL_I2C_GetState(&hi2c2);
 	  err = HAL_I2C_GetError(&hi2c2);
 	  isr = hi2c2.Instance->ISR;
-
+	  */
 	  debugger_acc = mpu_read_acc(&ax, &ay, &az);
 	  s.ax = ax;
 	  s.ay = ay;
@@ -299,6 +324,76 @@ void DataProcessTask(void *argument)
   }
   osThreadTerminate(NULL);
   /* USER CODE END DataProcessTask */
+}
+
+/* USER CODE BEGIN Header_SD_write_task */
+/**
+* @brief Function implementing the SD_write thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_SD_write_task */
+void SD_write_task(void *argument)
+{
+  /* USER CODE BEGIN SD_write_task */
+	TickType_t lastWakeTime = xTaskGetTickCount();
+	uint8_t wtext[] = "Hello World\n";
+	uint8_t rtext[100];
+
+	//mount SD card
+	if (f_mount(&SDFatFS, (TCHAR const*)SDPath, 0) != FR_OK) {
+	  //Error
+	  print_thread("Error Mounting SD card\n");
+	}
+	else {
+	  print_thread("SD card mounted successfully\n");
+	}
+
+	vTaskDelayUntil(&lastWakeTime, b2);
+
+	//open file for writing
+	if (f_open(&SDFile, filename, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK){
+		print_thread("Error opening file\n");
+	}
+	else {
+		print_thread("File opened successfully\n");
+
+		//write data to file to test
+		res = f_write(&SDFile, wtext, strlen((char*)wtext), (void *)&byteswritten);
+		if (byteswritten == 0 || (res != FR_OK)){
+			print_thread("Failed to write file\n");
+		}
+		else {
+			char msg[256];
+			snprintf(msg, sizeof(msg), "Write content: %s\n", wtext);
+
+			print_thread(msg);
+		}
+		f_close(&SDFile);
+	}
+
+	//test read file
+	f_open(&SDFile, filename, FA_READ);
+	memset(rtext, 0, sizeof(rtext));
+	res = f_read(&SDFile, rtext, sizeof(rtext), (UINT*)&bytesread);
+
+	if (bytesread== 0 || (res != FR_OK)){
+		print_thread("Failed to read file\n");
+	}
+	else {
+		char msg[256];
+		snprintf(msg, sizeof(msg), "Read content: %s\n", (char *)rtext);
+		print_thread(msg);
+	}
+	f_close(&SDFile);
+
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  osThreadTerminate(NULL);
+  /* USER CODE END SD_write_task */
 }
 
 /* Private application code --------------------------------------------------*/
