@@ -40,6 +40,10 @@ typedef struct {
 
 osStatus_t st;
 
+TickType_t period = pdMS_TO_TICKS(5);
+TickType_t b1 = pdMS_TO_TICKS(500);
+TickType_t b2 = pdMS_TO_TICKS(600);
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -134,7 +138,7 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the queue(s) */
   /* creation of data_queue */
-  data_queueHandle = osMessageQueueNew (2, sizeof(data_read), &data_queue_attributes);
+  data_queueHandle = osMessageQueueNew (16, sizeof(data_read), &data_queue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
@@ -174,10 +178,11 @@ void StartBlink01(void *argument)
 {
   /* USER CODE BEGIN StartBlink01 */
   /* Infinite loop */
+	TickType_t lastWakeTime = xTaskGetTickCount();
   for(;;)
   {
 	HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-    osDelay(500);
+	vTaskDelayUntil(&lastWakeTime, b1);
   }
   osThreadTerminate(NULL);
   /* USER CODE END StartBlink01 */
@@ -194,10 +199,12 @@ void StartBlink02(void *argument)
 {
   /* USER CODE BEGIN StartBlink02 */
   /* Infinite loop */
+	TickType_t lastWakeTime = xTaskGetTickCount();
   for(;;)
   {
 	HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-    osDelay(600);
+    //osDelay(600);
+	vTaskDelayUntil(&lastWakeTime, b2);
   }
   osThreadTerminate(NULL);
   /* USER CODE END StartBlink02 */
@@ -214,6 +221,7 @@ void SensorReadTask(void *argument)
 {
   /* USER CODE BEGIN SensorReadTask */
 	uint32_t t = 0;
+	TickType_t lastWakeTime = xTaskGetTickCount();
   /* Infinite loop */
   for(;;)
   {
@@ -234,7 +242,7 @@ void SensorReadTask(void *argument)
 
 	  t++;
 	  //osDelay(5); // 200 Hz-ishosDelay(1);
-	  osDelay(1);
+	  vTaskDelayUntil(&lastWakeTime, period);
   }
   osThreadTerminate(NULL);
   /* USER CODE END SensorReadTask */
