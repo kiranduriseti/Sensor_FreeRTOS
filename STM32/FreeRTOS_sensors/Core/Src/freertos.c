@@ -34,16 +34,21 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-typedef struct {
+typedef struct __attribute__((packed)) {
   uint32_t t_ms;
   int16_t ax, ay, az;
   int16_t gx, gy, gz;
 } data_read;
 
-#define chunk_size 1024
-data_read chunk[chunk_size];
+#define chunk_bytes 4096
+#define SD_QUEUE_TIMEOUT 1000
+#define max_samples (chunk_bytes/(sizeof(data_read)))
+uint32_t sd_chunk_len = 0;
+
+uint8_t sd_chunk[chunk_bytes];
 
 osStatus_t st;
+osStatus_t st_sd;
 
 TickType_t period = pdMS_TO_TICKS(5);
 TickType_t b1 = pdMS_TO_TICKS(500);
@@ -69,7 +74,14 @@ extern FIL SDFile;       /* File object for SD */
 FRESULT res;
 uint32_t byteswritten, bytesread;
 
-char* filename = "SD_file.txt";
+char* filename = "log.bin";
+
+uint32_t g_produced = 0;
+uint32_t g_dropped  = 0;
+uint32_t g_max_qdepth = 0;
+
+uint32_t g_data_dropped = 0;
+
 
 /* USER CODE END PTD */
 
@@ -122,10 +134,22 @@ const osThreadAttr_t SD_write_attributes = {
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for status */
+osThreadId_t statusHandle;
+const osThreadAttr_t status_attributes = {
+  .name = "status",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
 /* Definitions for data_queue */
 osMessageQueueId_t data_queueHandle;
 const osMessageQueueAttr_t data_queue_attributes = {
   .name = "data_queue"
+};
+/* Definitions for sd_queue */
+osMessageQueueId_t sd_queueHandle;
+const osMessageQueueAttr_t sd_queue_attributes = {
+  .name = "sd_queue"
 };
 /* Definitions for uartMutex */
 osMutexId_t uartMutexHandle;
@@ -136,6 +160,33 @@ const osMutexAttr_t uartMutex_attributes = {
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
 
+void sd_chunk_append_record(const data_read *rec)
+{
+  const uint32_t rec_sz = sizeof(*rec);
+  memcpy(&sd_chunk[sd_chunk_len], rec, rec_sz);
+  sd_chunk_len += rec_sz;
+}
+
+
+static FRESULT sd_flush_chunk(void)
+{
+  if (sd_chunk_len == 0) return FR_OK;
+
+  UINT bw = 0;
+  FRESULT r = f_write(&SDFile, sd_chunk, sd_chunk_len, &bw);
+
+  if ((r != FR_OK) || (bw != sd_chunk_len)) {
+    print_thread("SD flush failed\r\n");
+    return (r != FR_OK) ? r : FR_INT_ERR;
+  }
+
+  sd_chunk_len = 0;
+
+  // f_sync(&SDFile); //force metadata update more often (slower but safer)
+
+  return FR_OK;
+}
+
 /* USER CODE END FunctionPrototypes */
 
 void StartBlink01(void *argument);
@@ -143,6 +194,7 @@ void StartBlink02(void *argument);
 void SensorReadTask(void *argument);
 void DataProcessTask(void *argument);
 void SD_write_task(void *argument);
+void status_task(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -175,6 +227,9 @@ void MX_FREERTOS_Init(void) {
   /* creation of data_queue */
   data_queueHandle = osMessageQueueNew (16, sizeof(data_read), &data_queue_attributes);
 
+  /* creation of sd_queue */
+  sd_queueHandle = osMessageQueueNew (16, sizeof(data_read), &sd_queue_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
@@ -194,6 +249,9 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of SD_write */
   SD_writeHandle = osThreadNew(SD_write_task, NULL, &SD_write_attributes);
+
+  /* creation of status */
+  statusHandle = osThreadNew(status_task, NULL, &status_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -281,10 +339,29 @@ void SensorReadTask(void *argument)
 	  s.gy = gy;
 	  s.gz = gz;
 
+	  st_sd = osMessageQueuePut(sd_queueHandle, &s, 0, 0);
 	  st = osMessageQueuePut(data_queueHandle, &s, 0, 0);
 
-	  if (st != osOK) {
+//	  if (st == osOK) {
+//	    g_produced++;
+//
+//	    uint32_t depth = osMessageQueueGetCount(data_queueHandle);
+//	    if (depth > g_max_qdepth) g_max_qdepth = depth;
+//
+//	  } else {
+//	    // error -> count as dropped
+//	    g_dropped++;
+//	  }
+	  if (st != osOK) g_data_dropped++;
 
+	  if (st_sd == osOK) {
+	    g_produced++;
+	    uint32_t depth = osMessageQueueGetCount(sd_queueHandle);
+	    if (depth > g_max_qdepth) g_max_qdepth = depth;
+
+	  }
+	  else {
+	    g_dropped++;
 	  }
 
 	  t++;
@@ -387,13 +464,143 @@ void SD_write_task(void *argument)
 	}
 	f_close(&SDFile);
 
+	if (f_open(&SDFile, filename, FA_OPEN_ALWAYS | FA_WRITE) != FR_OK) {
+	print_thread("Error opening file for append/logging\n");
+	vTaskDelete(NULL);
+  }
+
+	f_lseek(&SDFile, f_size(&SDFile));
+	print_thread("SD file opened (append)\r\n");
+
+	data_read s;
+	const uint32_t rec_sz = sizeof(s);
+
+	TickType_t last_flush = xTaskGetTickCount();
+	const TickType_t flush_period = pdMS_TO_TICKS(1000);
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+	  osStatus_t ok = osMessageQueueGet(sd_queueHandle, &s, NULL, SD_QUEUE_TIMEOUT);
+
+	  if (ok == osOK)
+	  {
+		if (sd_chunk_len + rec_sz > chunk_bytes) { //too big
+		  if (sd_flush_chunk() != FR_OK) {
+			// no more writting
+		  }
+		  last_flush = xTaskGetTickCount();
+		}
+
+		sd_chunk_append_record(&s);
+	  }
+
+	  // Periodic flush
+	  if ((xTaskGetTickCount() - last_flush) >= flush_period) {
+		(void)sd_flush_chunk();
+		(void)f_sync(&SDFile);   // ensures data is committed periodically (slower but safer)
+		last_flush = xTaskGetTickCount();
+	  }
   }
   osThreadTerminate(NULL);
   /* USER CODE END SD_write_task */
+}
+
+/* USER CODE BEGIN Header_status_task */
+/**
+* @brief Function implementing the status thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_status_task */
+void status_task(void *argument)
+{
+  /* USER CODE BEGIN status_task */
+  /* Infinite loop */
+	const TickType_t one_sec = pdMS_TO_TICKS(1000);
+	TickType_t lastWake = xTaskGetTickCount();
+
+	uint32_t prev_prod = 0;
+	uint32_t prev_drop = 0;
+
+	uint32_t prev_data_drop = 0;
+
+
+  for(;;)
+  {
+	  taskENTER_CRITICAL();
+	  uint32_t prod = g_produced;
+	  uint32_t drop = g_dropped;
+	  uint32_t maxd = g_max_qdepth;
+	  uint32_t data_drop = g_data_dropped;
+	  taskEXIT_CRITICAL();
+
+	  uint32_t rate = prod - prev_prod;     // samples/sec produced
+	  uint32_t dps  = drop - prev_drop;     // drops/sec
+
+	  uint32_t data_dps = data_drop - prev_data_drop;
+
+	  prev_prod = prod;
+	  prev_drop = drop;
+	  prev_data_drop = data_drop;
+
+	  uint32_t qd_count = osMessageQueueGetCount(data_queueHandle);
+	  uint32_t qd_cap   = osMessageQueueGetCapacity(data_queueHandle);
+
+	  uint32_t qs_count = osMessageQueueGetCount(sd_queueHandle);
+	  uint32_t qs_cap   = osMessageQueueGetCapacity(sd_queueHandle);
+
+
+	  size_t heap_free = xPortGetFreeHeapSize();
+
+	  UBaseType_t sw_sensor  = uxTaskGetStackHighWaterMark((TaskHandle_t)SensorReadHandle);
+	  UBaseType_t sw_proc    = uxTaskGetStackHighWaterMark((TaskHandle_t)DataProcessHandle);
+	  UBaseType_t sw_sd      = uxTaskGetStackHighWaterMark((TaskHandle_t)SD_writeHandle);
+	  UBaseType_t sw_status  = uxTaskGetStackHighWaterMark((TaskHandle_t)statusHandle);
+
+	  char msg[256];
+//	  snprintf(msg, sizeof(msg),
+//		"[STAT] rate=%lu/s drops=%lu/s  q=%lu/%lu (max=%lu)  heap_free=%u  stack_wm(w): SR=%lu DP=%lu SD=%lu ST=%lu\r\n",
+//		(unsigned long)rate,
+//		(unsigned long)dps,
+//		(unsigned long)q_count,
+//		(unsigned long)q_cap,
+//		(unsigned long)maxd,
+//		(unsigned)heap_free,
+//		(unsigned long)sw_sensor,
+//		(unsigned long)sw_proc,
+//		(unsigned long)sw_sd,
+//		(unsigned long)sw_status
+//	  );
+	  snprintf(msg, sizeof(msg),
+	    "[STAT] rate=%lu/s  sdDrops=%lu/s  dataDrops=%lu/s  "
+	    "dataQ=%lu/%lu  sdQ=%lu/%lu (sdQmax=%lu)  "
+	    "heap_free=%u  stack_wm(w): SR=%lu DP=%lu SD=%lu ST=%lu\r\n",
+
+	    (unsigned long)rate,
+	    (unsigned long)dps,
+	    (unsigned long)data_dps,
+
+	    (unsigned long)qd_count,
+	    (unsigned long)qd_cap,
+
+	    (unsigned long)qs_count,
+	    (unsigned long)qs_cap,
+	    (unsigned long)maxd,
+
+	    (unsigned)heap_free,
+
+	    (unsigned long)sw_sensor,
+	    (unsigned long)sw_proc,
+	    (unsigned long)sw_sd,
+	    (unsigned long)sw_status
+	  );
+
+	  print_thread(msg);
+
+	  vTaskDelayUntil(&lastWake, one_sec);
+}
+  osThreadTerminate(NULL);
+  /* USER CODE END status_task */
 }
 
 /* Private application code --------------------------------------------------*/
