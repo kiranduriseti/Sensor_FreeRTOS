@@ -109,7 +109,9 @@ int main(void)
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
 
-  UART_print_blocking("Program Start");
+  UART_print_blocking("Program Start\n");
+  UART_print_blocking("Type STOP then Enter to stop logging safely\r\n");
+  uart_start_rx_it();
   mpu_init();
 
   /* USER CODE END 2 */

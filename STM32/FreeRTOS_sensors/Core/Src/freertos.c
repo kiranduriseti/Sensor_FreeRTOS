@@ -30,6 +30,7 @@
 #include "mpu.h"
 #include <string.h>
 #include "fatfs.h"
+#include "usart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -186,6 +187,7 @@ static FRESULT sd_flush_chunk(void)
 
   return FR_OK;
 }
+
 
 /* USER CODE END FunctionPrototypes */
 
@@ -500,6 +502,32 @@ void SD_write_task(void *argument)
 		(void)f_sync(&SDFile);   // ensures data is committed periodically (slower but safer)
 		last_flush = xTaskGetTickCount();
 	  }
+
+	  if (g_stop_req) {
+	      print_thread("[LOG] STOP received, draining queue...\r\n");
+
+	      // Drain remaining items quickly (non-blocking)
+	      while (osMessageQueueGet(sd_queueHandle, &s, NULL, 0) == osOK) {
+	        if (sd_chunk_len + rec_sz > chunk_bytes) {
+	          if (sd_flush_chunk() != FR_OK) break;
+	        }
+	        sd_chunk_append_record(&s);
+	      }
+
+	      print_thread("[LOG] Flushing chunk...\r\n");
+	      (void)sd_flush_chunk();
+	      (void)f_sync(&SDFile);
+
+	      print_thread("[LOG] Closing file...\r\n");
+	      f_close(&SDFile);
+
+	      print_thread("[LOG] Unmounting...\r\n");
+	      f_mount(NULL, (TCHAR const*)SDPath, 0);
+
+	      print_thread("[LOG] SAFE TO REMOVE / SWITCH FIRMWARE\r\n");
+
+	      vTaskSuspend(NULL);
+	    }
   }
   osThreadTerminate(NULL);
   /* USER CODE END SD_write_task */

@@ -11,8 +11,8 @@
 #include "cmsis_os.h"   // needed for osMutexId_t
 
 extern osMutexId_t uartMutexHandle;
-
-
+extern volatile int g_stop_req;
+void uart_start_rx_it();
 void UART_print(char *msg);
 void UART_print_blocking(char *msg);
 void print_thread (char* msg);

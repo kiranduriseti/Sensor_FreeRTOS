@@ -25,13 +25,49 @@ uint8_t input_size = 0;
 uint8_t tx_buffer1[IO_SIZE];
 uint8_t tx_buffer2[IO_SIZE];
 
+uint8_t uart_rx_byte;
+uint8_t uart_line_len = 0;
+char uart_line[32];
+
 uint8_t *active = tx_buffer1;
 uint8_t *pending = tx_buffer2;
 uint32_t pending_size = 0;
 
+volatile int g_stop_req;
+
 static volatile uint8_t tx_busy = 0;
 
 #include <sys/unistd.h>  // for STDOUT_FILENO
+
+void uart_start_rx_it(void){
+  HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1);
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance != huart2.Instance) {
+    return;
+  }
+
+  char c = (char)uart_rx_byte;
+
+  if (c == '\r' || c == '\n') {
+    uart_line[uart_line_len] = '\0';
+    if (strcmp(uart_line, "STOP") == 0) {
+      g_stop_req = 1;
+    }
+
+    uart_line_len = 0;
+  } else {
+    if (uart_line_len < (sizeof(uart_line) - 1)) {
+      uart_line[uart_line_len++] = c;
+    } else {
+      uart_line_len = 0;
+    }
+  }
+
+  HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1);
+}
 
 void UART_print(char *msg){
 	if (msg == NULL) return;
