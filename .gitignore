@@ -2,6 +2,21 @@
 # STM32CubeIDE / STM32CubeMX Git Ignore
 ############################################
 
+# Python venv
+.venv/
+venv/
+ENV/
+__pycache__/
+*.pyc
+
+# Data logs / outputs
+*.bin
+*.csv
+*.png
+*.jpg
+*.jpeg
+EOF
+
 # --- Build output folders ---
 Debug/
 Release/

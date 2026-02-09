@@ -337,7 +337,7 @@ void SensorReadTask(void *argument)
 	  s.az = az;
 
 	  debugger_gyro = mpu_read_gyro(&gx, &gy, &gz);
-	  s.gx = gz;
+	  s.gx = gx;
 	  s.gy = gy;
 	  s.gz = gz;
 
