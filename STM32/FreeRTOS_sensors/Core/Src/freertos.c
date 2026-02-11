@@ -31,6 +31,7 @@
 #include <string.h>
 #include "fatfs.h"
 #include "usart.h"
+#include "crc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -46,7 +47,7 @@ typedef struct __attribute__((packed)) {
 #define max_samples (chunk_bytes/(sizeof(data_read)))
 uint32_t sd_chunk_len = 0;
 
-uint8_t sd_chunk[chunk_bytes];
+__attribute__((aligned(4))) uint8_t sd_chunk[chunk_bytes]; //forces it to be on 4 but boundaries
 
 osStatus_t st;
 osStatus_t st_sd;
@@ -83,6 +84,7 @@ uint32_t g_max_qdepth = 0;
 
 uint32_t g_data_dropped = 0;
 
+extern CRC_HandleTypeDef hcrc;
 
 /* USER CODE END PTD */
 
@@ -139,7 +141,7 @@ const osThreadAttr_t SD_write_attributes = {
 osThreadId_t statusHandle;
 const osThreadAttr_t status_attributes = {
   .name = "status",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
 /* Definitions for data_queue */
@@ -168,8 +170,19 @@ void sd_chunk_append_record(const data_read *rec)
   sd_chunk_len += rec_sz;
 }
 
+uint32_t calc_pad_length(uint32_t length){
+	return ((4 - (length & 3)) & 3);
+}
 
-static FRESULT sd_flush_chunk(void)
+uint32_t calculate_crc32(uint8_t *data, uint32_t length_words){
+	__HAL_CRC_DR_RESET(&hcrc);
+
+	uint32_t crc = HAL_CRC_Calculate(&hcrc, (uint32_t *)data, length_words);
+
+	return crc;
+}
+
+FRESULT sd_flush_chunk(void)
 {
   if (sd_chunk_len == 0) return FR_OK;
 
@@ -177,11 +190,32 @@ static FRESULT sd_flush_chunk(void)
   FRESULT r = f_write(&SDFile, sd_chunk, sd_chunk_len, &bw);
 
   if ((r != FR_OK) || (bw != sd_chunk_len)) {
-    print_thread("SD flush failed\r\n");
+    print_thread("SD flush failed: data\r\n");
     return (r != FR_OK) ? r : FR_INT_ERR;
   }
 
+  uint32_t pad_length = calc_pad_length(sd_chunk_len);
+  for (int i = 0; i < pad_length; i++) {
+	  sd_chunk[sd_chunk_len + i] = 0;
+  }
+  pad_length = (sd_chunk_len + pad_length)/4;
+  uint32_t crc = calculate_crc32(sd_chunk, pad_length);
+
+  uint8_t validation_arr[8];
+  memcpy(&validation_arr[0], &crc, 4);
+  memcpy(&validation_arr[4], &sd_chunk_len, 4);
+
+  //writes crc and original length (python can calculate amount of padded bits and act accordingly)
+
+  r = f_write (&SDFile, validation_arr, 8, &bw);
+
+  if ((r != FR_OK) || (bw != 8)) {
+	  print_thread("SD flush failed: crc\r\n");
+	  return (r != FR_OK) ? r : FR_INT_ERR;
+  }
+
   sd_chunk_len = 0;
+  //memset(&sd_chunk[sd_chunk_len], 0, chunk_bytes);
 
   // f_sync(&SDFile); //force metadata update more often (slower but safer)
 
