@@ -174,10 +174,10 @@ uint32_t calc_pad_length(uint32_t length){
 	return ((4 - (length & 3)) & 3);
 }
 
-uint32_t calculate_crc32(uint8_t *data, uint32_t length_words){
-	__HAL_CRC_DR_RESET(&hcrc);
+uint32_t calculate_crc32(uint8_t *data, uint32_t length_bytes){
+	//__HAL_CRC_DR_RESET(&hcrc);
 
-	uint32_t crc = HAL_CRC_Calculate(&hcrc, (uint32_t *)data, length_words);
+	uint32_t crc = HAL_CRC_Calculate(&hcrc, (uint32_t *)data, length_bytes);
 
 	return crc;
 }
@@ -194,12 +194,15 @@ FRESULT sd_flush_chunk(void)
     return (r != FR_OK) ? r : FR_INT_ERR;
   }
 
-  uint32_t pad_length = calc_pad_length(sd_chunk_len);
-  for (int i = 0; i < pad_length; i++) {
-	  sd_chunk[sd_chunk_len + i] = 0;
-  }
-  pad_length = (sd_chunk_len + pad_length)/4;
-  uint32_t crc = calculate_crc32(sd_chunk, pad_length);
+  //uint32_t pad_length = calc_pad_length(sd_chunk_len); HAL handles padding itself
+
+//  for (int i = 0; i < pad_length; i++) {
+//	  sd_chunk[sd_chunk_len + i] = 0;
+//  }
+  //pad_length = (sd_chunk_len + pad_length); //length in bytes because byte mode
+  //uint32_t crc = calculate_crc32(sd_chunk, pad_length);
+
+  uint32_t crc = calculate_crc32(sd_chunk, sd_chunk_len);
 
   uint8_t validation_arr[8];
   memcpy(&validation_arr[0], &crc, 4);
@@ -484,6 +487,7 @@ void SD_write_task(void *argument)
 		}
 		f_close(&SDFile);
 	}
+	//remove Hello World Test when logging, just to ensure proper wiring
 
 	//test read file
 	f_open(&SDFile, filename, FA_READ);

@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
-"""
-typedef struct __attribute__((packed)) {
-  uint32_t t_ms;
-  int16_t ax, ay, az;
-  int16_t gx, gy, gz;
-} data_read;
 
-Defaults using mpu_init():
-  - Accel: ±2g  (16384 LSB/g)
-  - Gyro:  ±250 dps (131 LSB/(dps))
+'''
+For test:
+Syntetic log generation:
+python imu_log_tools.py --make-test log.bin --seconds 10 --rate_hz 200
+python imu_log_tools.py --bin log.bin
+python imu_log_tools.py --bin log.bin --show
+python imu_log_tools.py --bin log.bin --csv out.csv
 
-Usage:
-  python imu_log_tools.py --bin log.bin
-  python imu_log_tools.py --bin log.bin --csv out.csv
-  python imu_log_tools.py --bin log.bin --show
+For real logs:
+python imu_log_tools.py --bin log.bin --show
+'''
 
-Generator for synthetic test log:
-  python imu_log_tools.py --make-test test_log.bin --seconds 10 --rate_hz 200
-"""
 from __future__ import annotations
 
 import argparse
@@ -25,30 +19,26 @@ import struct
 import math
 import random
 from dataclasses import dataclass
-from typing import Iterator, Tuple, List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Your packed struct is 16 bytes
+# ----------------------------
+# Record format (your struct)
+# ----------------------------
 RECORD_FMT = "<Ihhhhhh"   # little-endian: uint32 + 6x int16
 RECORD_SIZE = struct.calcsize(RECORD_FMT)
 
-DEFAULT_ACCEL_RANGE_G = 2     # ±2g
-DEFAULT_GYRO_RANGE_DPS = 250  # ±250 dps
+# Trailer format you write: [crc32][chunk_len] (both little-endian uint32)
+TRAILER_FMT = "<II"
+TRAILER_SIZE = struct.calcsize(TRAILER_FMT)  # 8
 
-ACC_LSB_PER_G = {
-    2: 16384.0,
-    4: 8192.0,
-    8: 4096.0,
-    16: 2048.0,
-}
-GYRO_LSB_PER_DPS = {
-    250: 131.0,
-    500: 65.5,
-    1000: 32.8,
-    2000: 16.4,
-}
+DEFAULT_ACCEL_RANGE_G = 2
+DEFAULT_GYRO_RANGE_DPS = 250
+
+ACC_LSB_PER_G = {2: 16384.0, 4: 8192.0, 8: 4096.0, 16: 2048.0}
+GYRO_LSB_PER_DPS = {250: 131.0, 500: 65.5, 1000: 32.8, 2000: 16.4}
 
 @dataclass
 class Record:
@@ -60,19 +50,89 @@ class Record:
     gy: int
     gz: int
 
-def iter_records(path: str) -> Iterator[Record]:
-    with open(path, "rb") as f:
-        data = f.read()
+# ----------------------------
+# CRC-32/MPEG-2 (STM32 default CRC, bytes mode, no inversion)
+# poly = 0x04C11DB7, init = 0xFFFFFFFF, refin/refout = False, xorout = 0
+# ----------------------------
+def crc32_mpeg2(data: bytes, init: int = 0xFFFFFFFF) -> int:
+    poly = 0x04C11DB7
+    crc = init & 0xFFFFFFFF
+    for b in data:
+        crc ^= (b << 24)  # non-reflected: byte goes into MSB
+        for _ in range(8):
+            if (crc & 0x80000000) != 0:
+                crc = ((crc << 1) ^ poly) & 0xFFFFFFFF
+            else:
+                crc = (crc << 1) & 0xFFFFFFFF
+    return crc
 
-    n = len(data) // RECORD_SIZE
-    if n == 0:
-        return
-    
-    #cut off incomplete trailing record
+def iter_records_from_payload(payload: bytes) -> Iterator[Record]:
+    # payload is raw concatenation of packed records
+    n = len(payload) // RECORD_SIZE
     for i in range(n):
         off = i * RECORD_SIZE
-        t_ms, ax, ay, az, gx, gy, gz = struct.unpack_from(RECORD_FMT, data, off)
+        t_ms, ax, ay, az, gx, gy, gz = struct.unpack_from(RECORD_FMT, payload, off)
         yield Record(t_ms, ax, ay, az, gx, gy, gz)
+
+def read_chunks_backwards(path: str, verify_crc: bool = True) -> List[bytes]:
+    """
+    Returns payload chunks in chronological order (start->end),
+    parsing file format: [payload][crc,len] repeated, but read backwards.
+    """
+    with open(path, "rb") as f:
+        blob = f.read()
+
+    pos = len(blob)
+    chunks_rev: List[bytes] = []
+
+    while pos >= TRAILER_SIZE:
+        trailer = blob[pos - TRAILER_SIZE:pos]
+        stored_crc, chunk_len = struct.unpack(TRAILER_FMT, trailer)
+
+        payload_end = pos - TRAILER_SIZE
+        payload_start = payload_end - chunk_len
+
+        if payload_start < 0:
+            raise ValueError(
+                f"Corrupt file: chunk_len={chunk_len} goes before BOF at pos={pos}"
+            )
+
+        payload = blob[payload_start:payload_end]
+
+        # Basic sanity checks
+        if chunk_len != len(payload):
+            raise ValueError("Internal length mismatch (should never happen).")
+        if chunk_len % RECORD_SIZE != 0:
+            # You *expect* chunk payload to be multiple of 16 (packed records)
+            raise ValueError(
+                f"Chunk payload not multiple of RECORD_SIZE ({RECORD_SIZE}). "
+                f"chunk_len={chunk_len}"
+            )
+
+        if verify_crc:
+            calc = crc32_mpeg2(payload)
+            if calc != stored_crc:
+                raise ValueError(
+                    f"CRC mismatch for chunk ending at {pos}: "
+                    f"stored=0x{stored_crc:08X} calc=0x{calc:08X} len={chunk_len}"
+                )
+
+        chunks_rev.append(payload)
+        pos = payload_start  # jump back to previous chunk
+
+        if pos == 0:
+            break
+
+    if pos != 0:
+        raise ValueError("Corrupt file: did not land exactly on BOF after parsing.")
+
+    # reverse to chronological order
+    return list(reversed(chunks_rev))
+
+def iter_records(path: str, verify_crc: bool = True) -> Iterator[Record]:
+    chunks = read_chunks_backwards(path, verify_crc=verify_crc)
+    for payload in chunks:
+        yield from iter_records_from_payload(payload)
 
 def records_to_df(records: List[Record],
                   accel_range_g: int,
@@ -82,8 +142,8 @@ def records_to_df(records: List[Record],
     if gyro_range_dps not in GYRO_LSB_PER_DPS:
         raise ValueError(f"Unsupported gyro_range_dps={gyro_range_dps}. Use one of {sorted(GYRO_LSB_PER_DPS.keys())}")
 
-    a_scale = 1.0 / ACC_LSB_PER_G[accel_range_g]   # g per LSB
-    g_scale = 1.0 / GYRO_LSB_PER_DPS[gyro_range_dps]  # dps per LSB
+    a_scale = 1.0 / ACC_LSB_PER_G[accel_range_g]
+    g_scale = 1.0 / GYRO_LSB_PER_DPS[gyro_range_dps]
 
     rows = []
     for r in records:
@@ -111,7 +171,6 @@ def plot_df(df: pd.DataFrame, title: str = "IMU Log") -> None:
         print("No data to plot.")
         return
 
-    # Accel
     plt.figure()
     plt.plot(df["t_s"], df["ax_g"], label="ax (g)")
     plt.plot(df["t_s"], df["ay_g"], label="ay (g)")
@@ -121,7 +180,6 @@ def plot_df(df: pd.DataFrame, title: str = "IMU Log") -> None:
     plt.title(title + " - Accel")
     plt.legend()
 
-    # Gyro
     plt.figure()
     plt.plot(df["t_s"], df["gx_dps"], label="gx (dps)")
     plt.plot(df["t_s"], df["gy_dps"], label="gy (dps)")
@@ -131,7 +189,6 @@ def plot_df(df: pd.DataFrame, title: str = "IMU Log") -> None:
     plt.title(title + " - Gyro")
     plt.legend()
 
-    # Magnitudes
     plt.figure()
     plt.plot(df["t_s"], df["a_mag_g"], label="|a| (g)")
     plt.plot(df["t_s"], df["g_mag_dps"], label="|g| (dps)")
@@ -140,72 +197,55 @@ def plot_df(df: pd.DataFrame, title: str = "IMU Log") -> None:
     plt.title(title + " - Magnitudes")
     plt.legend()
 
-def make_test_log(path: str, seconds: float, rate_hz: float,
-                  accel_range_g: int = DEFAULT_ACCEL_RANGE_G,
-                  gyro_range_dps: int = DEFAULT_GYRO_RANGE_DPS) -> None:
+def make_test_log(path: str, seconds: float, rate_hz: float) -> None:
     """
-    Generates a synthetic log that *resembles* a stationary board with:
-      - ~1g on Z accel plus a small sinusoid on X/Y
-      - A slow yaw rate sinusoid on gyro Z
-    Data are written in the exact packed-binary format your STM32 uses.
+    Writes chunk in
+      [payload records][crc32][payload_len]
     """
-    a_lsb_per_g = ACC_LSB_PER_G[accel_range_g]
-    g_lsb_per_dps = GYRO_LSB_PER_DPS[gyro_range_dps]
-
     dt = 1.0 / rate_hz
     n = int(seconds * rate_hz)
 
+    payload = bytearray()
+    for i in range(n):
+        t_s = i * dt
+        t_ms = int(round(t_s * 1000.0))
+
+        ax_g = 0.05 * math.sin(2 * math.pi * 1.0 * t_s)
+        ay_g = 0.05 * math.cos(2 * math.pi * 1.0 * t_s)
+        az_g = 1.0 + 0.02 * math.sin(2 * math.pi * 0.2 * t_s)
+
+        gx_dps = 5.0 * math.sin(2 * math.pi * 0.5 * t_s)
+        gy_dps = 3.0 * math.cos(2 * math.pi * 0.5 * t_s)
+        gz_dps = 15.0 * math.sin(2 * math.pi * 0.1 * t_s)
+
+        ax = int(round(ax_g * ACC_LSB_PER_G[DEFAULT_ACCEL_RANGE_G]))
+        ay = int(round(ay_g * ACC_LSB_PER_G[DEFAULT_ACCEL_RANGE_G]))
+        az = int(round(az_g * ACC_LSB_PER_G[DEFAULT_ACCEL_RANGE_G]))
+        gx = int(round(gx_dps * GYRO_LSB_PER_DPS[DEFAULT_GYRO_RANGE_DPS]))
+        gy = int(round(gy_dps * GYRO_LSB_PER_DPS[DEFAULT_GYRO_RANGE_DPS]))
+        gz = int(round(gz_dps * GYRO_LSB_PER_DPS[DEFAULT_GYRO_RANGE_DPS]))
+
+        def clamp_i16(v: int) -> int:
+            return max(-32768, min(32767, v))
+
+        payload += struct.pack(RECORD_FMT,
+                               t_ms,
+                               clamp_i16(ax), clamp_i16(ay), clamp_i16(az),
+                               clamp_i16(gx), clamp_i16(gy), clamp_i16(gz))
+
+    crc = crc32_mpeg2(payload)
+    trailer = struct.pack(TRAILER_FMT, crc, len(payload))
+
     with open(path, "wb") as f:
-        for i in range(n):
-            t_s = i * dt
-            t_ms = int(round(t_s * 1000.0))
-
-            # accel in g
-            ax_g = 0.05 * math.sin(2 * math.pi * 1.0 * t_s)
-            ay_g = 0.05 * math.cos(2 * math.pi * 1.0 * t_s)
-            az_g = 1.0 + 0.02 * math.sin(2 * math.pi * 0.2 * t_s)
-
-            # gyro in dps
-            gx_dps = 5.0 * math.sin(2 * math.pi * 0.5 * t_s)
-            gy_dps = 3.0 * math.cos(2 * math.pi * 0.5 * t_s)
-            gz_dps = 15.0 * math.sin(2 * math.pi * 0.1 * t_s)
-
-            # add small noise
-            ax_g += random.uniform(-0.005, 0.005)
-            ay_g += random.uniform(-0.005, 0.005)
-            az_g += random.uniform(-0.005, 0.005)
-            gx_dps += random.uniform(-0.2, 0.2)
-            gy_dps += random.uniform(-0.2, 0.2)
-            gz_dps += random.uniform(-0.2, 0.2)
-
-            # convert to raw int16
-            ax = int(round(ax_g * a_lsb_per_g))
-            ay = int(round(ay_g * a_lsb_per_g))
-            az = int(round(az_g * a_lsb_per_g))
-            gx = int(round(gx_dps * g_lsb_per_dps))
-            gy = int(round(gy_dps * g_lsb_per_dps))
-            gz = int(round(gz_dps * g_lsb_per_dps))
-
-            # clamp to int16 range
-            def clamp_i16(v: int) -> int:
-                return max(-32768, min(32767, v))
-
-            rec = struct.pack(RECORD_FMT,
-                              t_ms,
-                              clamp_i16(ax), clamp_i16(ay), clamp_i16(az),
-                              clamp_i16(gx), clamp_i16(gy), clamp_i16(gz))
-            f.write(rec)
+        f.write(payload)
+        f.write(trailer)
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", help="Input binary log (e.g., log.bin)")
     ap.add_argument("--csv", help="Optional output CSV path")
     ap.add_argument("--show", action="store_true", help="Show plots")
-
-    ap.add_argument("--accel_range_g", type=int, default=DEFAULT_ACCEL_RANGE_G,
-                    help="Accel full-scale range in g (defaults to 2 to match mpu_init)")
-    ap.add_argument("--gyro_range_dps", type=int, default=DEFAULT_GYRO_RANGE_DPS,
-                    help="Gyro full-scale range in deg/s (defaults to 250 to match mpu_init)")
+    ap.add_argument("--no-verify", action="store_true", help="Skip CRC verification")
 
     ap.add_argument("--make-test", dest="make_test", help="Generate a synthetic test log to this path")
     ap.add_argument("--seconds", type=float, default=10.0, help="Seconds for synthetic test log")
@@ -214,23 +254,20 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.make_test:
-        make_test_log(args.make_test, args.seconds, args.rate_hz,
-                      accel_range_g=args.accel_range_g,
-                      gyro_range_dps=args.gyro_range_dps)
+        make_test_log(args.make_test, args.seconds, args.rate_hz)
         print(f"Wrote synthetic test log: {args.make_test}")
         return
 
     if not args.bin:
         ap.error("Provide --bin log.bin (or use --make-test ...)")
 
-    recs = list(iter_records(args.bin))
+    recs = list(iter_records(args.bin, verify_crc=not args.no_verify))
     if not recs:
-        print("No complete records found (file too small or empty).")
+        print("No complete records found.")
         return
 
-    df = records_to_df(recs, args.accel_range_g, args.gyro_range_dps)
+    df = records_to_df(recs, DEFAULT_ACCEL_RANGE_G, DEFAULT_GYRO_RANGE_DPS)
 
-    # Basic sanity printout
     print(f"Records: {len(df)}  Duration: {df['t_s'].iloc[-1] - df['t_s'].iloc[0]:.3f}s")
     print(df.head(5).to_string(index=False))
 
